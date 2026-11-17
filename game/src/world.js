@@ -46,6 +46,8 @@ export function buildDepth(depthN, seed, relics) {
   for (const p of spine) trail.push(p);
 
   // Fungi along the spine (and along both fork branches on depth 3).
+  // v2: LARGE blooms — radius 6–14 (was 3–7), big soft glows, a garden
+  // the player can actually see. Amber + cyan, the cave's permanent light.
   const fungi = [];
   function fungiAlong(a, b, n) {
     for (let i = 0; i < n; i++) {
@@ -53,7 +55,7 @@ export function buildDepth(depthN, seed, relics) {
       fungi.push({
         x: a.x + (b.x - a.x) * t + range(rng, -26, 26),
         y: a.y + (b.y - a.y) * t + range(rng, -26, 26),
-        r: range(rng, 3, 7),
+        r: range(rng, 6, 14),
         gold: rng() < 0.35,
         phase: rng() * Math.PI * 2,
       });
@@ -91,21 +93,37 @@ export function buildDepth(depthN, seed, relics) {
     }
     if (nearTrail) continue;
     if (stalactites.some((s) => dist(x, y, s.x, s.y) < r + s.r + 24)) continue;
-    stalactites.push({ x, y, r });
+    stalactites.push({ x, y, r, shattered: false }); // v2: 1 pulse hit shatters one
   }
 
   // Breather chamber: a wide spot with many moths, no owl, before the exit.
   const breather = { x: PF.x + PF.w * 0.68, y: PF.y + PF.h * 0.5, r: 90 };
 
   // Moths cluster near the fungi trail (never more than ~150px from a fungus).
+  // v2: SWARMS — the first 5–8 moths cluster tight (radius 18–60px) around
+  // one big fungus near the middle of the cave, so eating a whole swarm fast
+  // is the skill shot; the rest scatter near fungi as before.
   const moths = [];
+  const swarmCenter = fungi[Math.floor(fungi.length * 0.45)];
+  const swarmSize = Math.min(d.moths, 5 + Math.floor(rng() * 4));
   for (let i = 0; i < d.moths; i++) {
-    const f = fungi[Math.floor(rng() * fungi.length)];
-    const a = rng() * Math.PI * 2;
-    const rr = range(rng, 18, 130);
+    let fx;
+    let fy;
+    if (i < swarmSize) {
+      const a = rng() * Math.PI * 2;
+      const rr = range(rng, 18, 60);
+      fx = swarmCenter.x + Math.cos(a) * rr;
+      fy = swarmCenter.y + Math.sin(a) * rr;
+    } else {
+      const f = fungi[Math.floor(rng() * fungi.length)];
+      const a = rng() * Math.PI * 2;
+      const rr = range(rng, 18, 130);
+      fx = f.x + Math.cos(a) * rr;
+      fy = f.y + Math.sin(a) * rr;
+    }
     moths.push({
-      x: clamp(f.x + Math.cos(a) * rr, PF.x + 16, PF.x + PF.w - 16),
-      y: clamp(f.y + Math.sin(a) * rr, PF.y + 16, PF.y + PF.h - 16),
+      x: clamp(fx, PF.x + 16, PF.x + PF.w - 16),
+      y: clamp(fy, PF.y + 16, PF.y + PF.h - 16),
       vx: 0, vy: 0,
       wing: rng() * Math.PI * 2,
       stun: 0,
@@ -128,6 +146,9 @@ export function buildDepth(depthN, seed, relics) {
     alertT: 0, alertX: 0, alertY: 0,
     hunt: 0, // hunt meter 0..1 — fills as the owl closes in
     diving: 0, retreatT: 0,
+    diveWarnT: 0, // v2: 0.5s telegraph before a dive (shadow pool + screech ring)
+    diveTarget: null, // where the dive is aimed (bat's spot when warned)
+    knockT: 0, knockX: 0, knockY: 0, // v2: pulse knockback (owl shoved away)
     wing: 0,
     passT: depthN === 2 ? 6 : 0, // depth 2: the owl sweeps across every ~15s
     active: d.owl !== 'absent',
@@ -195,13 +216,29 @@ export function updateWorld(w, bat, dt, events) {
     let tx = owl.x;
     let ty = owl.y;
     let speed = owlSpeed * 0.55; // patrol speed
-    if (owl.retreatT > 0) {
+    if (owl.knockT > 0) {
+      // v2: knocked back by a close-range pulse — shoved away from the bat.
+      owl.knockT -= dt;
+      owl.x = clamp(owl.x + owl.knockX * dt, PF.x + 20, PF.x + PF.w - 20);
+      owl.y = clamp(owl.y + owl.knockY * dt, PF.y + 20, PF.y + PF.h - 20);
+    } else if (owl.diveWarnT > 0) {
+      // v2: telegraph — the owl hovers, wings spread, while the shadow pools
+      // under the dive point. It does not move during the warning.
+      owl.diveWarnT -= dt;
+      if (owl.diveWarnT <= 0 && owl.diving <= 0 && owl.retreatT <= 0) {
+        owl.diving = 0.9;
+        events.owlDive = true;
+      }
+    } else if (owl.retreatT > 0) {
       owl.retreatT -= dt;
       tx = PF.x + PF.w * 0.5; ty = PF.y + 30; // retreat to the top
       speed = owlSpeed;
     } else if (owl.diving > 0) {
       owl.diving -= dt;
-      tx = bat.x; ty = bat.y;
+      // v2: the dive aims at the warned spot (diveTarget), not the bat's live
+      // position — the telegraph is dodgeable, that is the point of it.
+      tx = owl.diveTarget ? owl.diveTarget.x : bat.x;
+      ty = owl.diveTarget ? owl.diveTarget.y : bat.y;
       speed = owlSpeed * 2.2;
     } else if (w.depth.owl === 'chases') {
       tx = bat.x; ty = bat.y; speed = owlSpeed; // depth 5: constant chase
@@ -251,21 +288,36 @@ export function updateWorld(w, bat, dt, events) {
     } else {
       owl.hunt = Math.max(0, owl.hunt - dt * 0.25);
     }
-    if (owl.hunt >= 1 && owl.diving <= 0 && owl.retreatT <= 0) {
-      owl.diving = 0.9; // the dive
-      events.owlDive = true;
+    // v2: a full hunt meter TELEGRAPHS the dive (0.5s shadow pool + screech
+    // ring) instead of diving instantly — the player gets a fair dodge.
+    if (owl.hunt >= 1 && owl.diving <= 0 && owl.diveWarnT <= 0 && owl.retreatT <= 0) {
+      owl.diveWarnT = CFG.owlDiveWarnSecs;
+      owl.diveTarget = { x: bat.x, y: bat.y };
+      events.owlWarn = true;
     }
   }
 }
 
-// A pulse at (x, y): stun moths in the ring, alert the owl, dim the fungi.
-// Relics stack: WIDE PULSE x1.5 radius each (and the fungi dim 1s longer each).
+// A pulse at (x, y): stun moths in the ring, SHATTER stalactites in the
+// ring (v2: 1 hit clears one, opening paths), alert the owl, knock the owl
+// back at close range (v2), dim the fungi. Relics stack: WIDE PULSE x1.5
+// radius each (and the fungi dim 1s longer each).
 export function applyPulse(w, bat, events) {
   const wideN = w.relics.filter((r) => r === 'wide').length;
   const radius = CFG.pulseRadius * Math.pow(1.5, wideN);
   for (const m of w.moths) {
     if (!m.eaten && dist(m.x, m.y, bat.x, bat.y) < radius) m.stun = 1.5;
   }
+  // v2: stalactites SHATTER on 1 pulse hit — destructible cover that opens
+  // shortcuts. The shattered ones stop being hazards (batHitsWall skips them).
+  const shattered = [];
+  for (const s of w.stalactites) {
+    if (!s.shattered && dist(s.x, s.y, bat.x, bat.y) < radius + s.r) {
+      s.shattered = true;
+      shattered.push(s);
+    }
+  }
+  if (shattered.length) events.shattered = shattered;
   const owl = w.owl;
   if (owl.active) {
     const d = dist(owl.x, owl.y, bat.x, bat.y);
@@ -274,8 +326,16 @@ export function applyPulse(w, bat, events) {
     owl.alertX = bat.x;
     owl.alertY = bat.y;
     if (d < radius + 60) {
-      // Close-range pulse drives the owl back — the hunt meter drains.
+      // Close-range pulse drives the owl back — the hunt meter drains, and
+      // v2 the owl is KNOCKED BACK visibly, away from the bat.
       owl.hunt = Math.max(0, owl.hunt - 0.45);
+      const kb = CFG.owlKnockbackPx;
+      const nx = (owl.x - bat.x) / (d || 1);
+      const ny = (owl.y - bat.y) / (d || 1);
+      owl.knockX = nx * kb / 0.35;
+      owl.knockY = ny * kb / 0.35;
+      owl.knockT = 0.35;
+      events.owlKnocked = true;
       if (owl.hunt <= 0.05 && owl.diving <= 0) owl.retreatT = 5;
     }
   }
@@ -291,6 +351,7 @@ export function batHitsWall(w, bat) {
     return true;
   }
   for (const s of w.stalactites) {
+    if (s.shattered) continue; // v2: shattered stalactites are open ground
     if (dist(bat.x, bat.y, s.x, s.y) < s.r + CFG.batRadius - 2) return true;
   }
   return false;

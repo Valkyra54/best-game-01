@@ -52,6 +52,8 @@ function newGame() {
     roostT: 0,
     rings: [],
     particles: [],
+    shards: [], // v2: stalactite shards from a shatter (rock triangles)
+    flash: 0, // v2: radial pulse flash, 1 -> 0
     floats: [],
     shakeT: 0, shakeDur: 0.3, shakeMag: 0,
     hitStop: 0,
@@ -75,13 +77,27 @@ function addFloat(x, y, text, col, big) {
   g.floats.push({ x, y, text, col: col || CFG.col.paleGold, big: !!big, life: CFG.floatSecs, max: CFG.floatSecs });
 }
 
-function burst(x, y, n) {
+function burst(x, y, n, col) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = 40 + Math.random() * 90;
     g.particles.push({
       x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
       r: 1.5 + Math.random() * 2.5, life: 0.5 + Math.random() * 0.4, max: 0.9,
+      col: col || '247, 181, 0',
+    });
+  }
+}
+
+// v2: a stalactite shatters into spinning rock shards.
+function shatterBurst(s) {
+  for (let i = 0; i < 10; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 60 + Math.random() * 140;
+    g.shards.push({
+      x: s.x, y: s.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      r: 3 + Math.random() * 6, rot: Math.random() * Math.PI * 2,
+      vr: (Math.random() - 0.5) * 12, life: 0.7 + Math.random() * 0.4, max: 1.1,
     });
   }
 }
@@ -134,8 +150,12 @@ function eatMoth(m) {
   const pts = CFG.mothScore * g.chain;
   g.score += pts;
   audio.chime(g.chain);
-  burst(m.x, m.y, 8);
-  addFloat(m.x, m.y - 14, `+${pts}${g.chain > 1 ? '  CHAIN x' + g.chain : ''}`, CFG.col.paleGold, g.chain >= 3);
+  // v2: a moth BURSTS — 16 gold + white particles, a 3-frame hit-stop, and a
+  // big floating number. The burst is the reward, make it land.
+  burst(m.x, m.y, 12);
+  burst(m.x, m.y, 6, '255, 255, 255');
+  g.hitStop = CFG.hitStopBurst;
+  addFloat(m.x, m.y - 14, `+${pts}${g.chain > 1 ? '  CHAIN x' + g.chain : ''}`, CFG.col.paleGold, g.chain >= 2);
   g.bat.squash = 1;
   if (g.mothsEaten >= g.world.depth.quota && !g.world.exitOpen) {
     g.world.exitOpen = true;
@@ -155,6 +175,21 @@ function doPulse() {
   applyPulse(g.world, g.bat, events);
   audio.ping();
   shake(CFG.shakeLight, 0.18);
+  // v2: the radial flash — the blast is the brightest thing in the frame.
+  g.flash = 1;
+  // v2: stalactites shattered by this pulse — shards + shake + a float each.
+  if (events.shattered) {
+    for (const s of events.shattered) {
+      shatterBurst(s);
+      burst(s.x, s.y, 6, '0, 220, 220');
+    }
+    shake(CFG.shakeShatter, 0.3);
+    addFloat(g.bat.x, g.bat.y - 52, `SHATTERED ×${events.shattered.length}`, '#7df3f7', true);
+  }
+  // v2: the owl knocked back — say so on screen.
+  if (events.owlKnocked) {
+    addFloat(g.world.owl.x, g.world.owl.y - 52, 'OWL DRIVEN BACK!', CFG.col.gold, true);
+  }
   if (g.world.owl.active && g.world.owl.alertT > 0) {
     addFloat(g.bat.x, g.bat.y - 30, 'THE OWL STIRS!', '#ff9d7a', false);
     audio.hoot();
@@ -174,6 +209,8 @@ function startDepth(n) {
   g.flutterCd = 0;
   g.rings = [];
   g.floats = [];
+  g.shards = [];
+  g.flash = 0;
   g.state = 'play';
   g.lastSafe = { x: world.start.x, y: world.start.y };
   // THICK HIDE stacks: +0.5s pulse cooldown per hide relic.
@@ -221,13 +258,21 @@ function update(dt) {
   // Rings age.
   for (const ring of g.rings) ring.age += dt;
   g.rings = g.rings.filter((r) => r.age < CFG.pulseRevealSecs + 0.2);
-  // Particles / floats.
+  // Particles / floats / shards / flash.
   for (const p of g.particles) {
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.vx *= 0.96; p.vy *= 0.96;
     p.life -= dt;
   }
   g.particles = g.particles.filter((p) => p.life > 0);
+  for (const s of g.shards) {
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    s.vx *= 0.94; s.vy *= 0.94;
+    s.rot += s.vr * dt;
+    s.life -= dt;
+  }
+  g.shards = g.shards.filter((s) => s.life > 0);
+  if (g.flash > 0) g.flash = Math.max(0, g.flash - dt * 3.2); // ~0.3s flash
   for (const f of g.floats) f.life -= dt;
   g.floats = g.floats.filter((f) => f.life > 0);
   if (g.bat.squash > 0) g.bat.squash = Math.max(0, g.bat.squash - dt * 4);
@@ -366,6 +411,7 @@ function update(dt) {
     const events = {};
     updateWorld(w, bat, dt, events);
     if (events.owlDive) audio.hoot();
+    if (events.owlWarn) audio.hoot(); // the screech that telegraphs the dive
 
     // Eat moths.
     for (const mo of w.moths) {
